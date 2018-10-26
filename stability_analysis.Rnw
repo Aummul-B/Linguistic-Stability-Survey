@@ -1,0 +1,164 @@
+\documentclass{article}
+
+\usepackage{geometry}
+\geometry{verbose,tmargin=1in,bmargin=1in,lmargin=1in,rmargin=1in}
+\usepackage{fancyhdr}
+\pagestyle{fancy}
+\setlength{\parskip}{\smallskipamount}
+\setlength{\parindent}{0pt}
+\usepackage{amsthm}
+\usepackage{amsmath}
+
+
+\begin{document}
+\SweaveOpts{concordance=TRUE}
+
+\title{Lab 3 - Parallelizing k-means Stat 215A, Fall 2017}
+
+
+\author{Aummul Baneen Manasawala}
+
+\maketitle
+
+
+<<setup, echo = FALSE, message=FALSE, warning=FALSE, cache = TRUE>>=
+#Loading the packages
+library(tidyverse)
+library('foreach')
+library('doParallel')
+library(microbenchmark)
+@
+
+
+<<setup2, echo = FALSE, message=FALSE, warning=FALSE, cache = TRUE>>=
+#Load the Data
+load("data/lingBinary.RData")
+
+
+#Sourcing the SimilarityCoeff function using C++ for faster computation
+#Sourcing the SimilarityCoeff function using R
+library(Rcpp)
+Rcpp::sourceCpp("SimilarityCPP.cpp")
+source("SimilarityR.R")
+@
+
+\section*{Optimizing the Time Complexity of Similarity Matrix}
+Amongst the three alternative measures of similarity mentioned in the paper, we chose the correlation or cosine similarity measure which was advocated by Fowlkes and Mallows. We justify the choice by its simplicity and geometric interpretability as well as strong algebriac intuition prevalant in the masses. The calculation involved the for loops on matrix which was computationally heavy. This led us to investigate the methods that could save time and resources in computation.
+
+The for loops in R take much longer to run than the for loops in C++. This is because of the fact that every operation carries around a lot of extra baggage. Therefore, we considered using the C++ code to form the similarity matrix rather than the base R code as we had to form a hugh matrix that would be in the order of 30000*30000. Inorder to prove our hypothesis that the C++ code would significantly reduce the time and the computation required to calculate the similarity, we did microbenchmarking.
+
+
+<<comp, echo = FALSE, message=FALSE, warning=FALSE, cache = TRUE>>=
+#compare C++ and R versions of the similarity matrix
+L1 <- c(1, 2, 3, 1, 2, 3)
+L2 <- c(2, 3, 1, 3, 2, 1)
+
+#Checking for the equality
+check_for_equal_coefs <- function(values) {
+  tol <- 1
+  max_error <- max(c(abs(values[[1]] - values[[2]])))
+  max_error < tol
+}
+
+
+mbm <- microbenchmark("R" = { a = SimilarityCoeff(L1, L2)},
+               "CPP" = {
+                 b = SimilarityCoeffCPP(L1, L2)
+               },
+               check = check_for_equal_coefs)
+@
+
+
+
+\begin{figure}
+  \centering
+\begin{center}
+<<microbenchmark, fig = TRUE, echo = FALSE, warning = FALSE, out.width='0.5\\linewidth', fig.width=8, fig.height=10>>=
+
+ggplot(mbm) + geom_violin(aes(x = expr, y = time), col = "red", fill = "light yellow") + theme_bw() + xlab("Programming Language") + ylab("Run Time in microseconds") + ylim(c(0, 80000))
+@
+  \caption{Comparision between the computation time for the similarity co-efficient from R code and C++ code}
+  \label{rcpp}
+\end{center}
+\end{figure}
+
+Although the similarity coefficient obtained from both the languages is exactly the same, but the time characteristics have striking differences. In order to study them in detail, we plot the distribution of the time required for the computation in R and C++ (figure \ref{rcpp}). We find that R is not only significantly slower than C++, but also it's distribution of time required has a light tail and hence more uncertainity associated with it than the heavy tailed distribution of the C++ code. To put things in perspective, on average, R takes approximately 100 times more time than C++ code. Proving our earlier hypothesis from this analysis, we chose to run our algorithm to choose the number of clusters in the data from the stability perspective using the similarity 
+computed using C++ code that could handle the for loops much more efficiently than R.
+
+\subsubsection*{Avoiding matrix storage}
+The space complexity of the similarity computation for 0.8 fraction of the data is 29,000 * 29,000. Thus, a method that could by-pass the storage of labeling matrix could be benificial significantly for the well being of the memory of our computer. Therefore, we devised a method that did not need matrix storage for the similarity calculation. This was achieved by simultaneously adding the the dot product of each element in a variable instead of forming a matrix that would be multiplied at the end.    
+
+
+\section*{Application of the stability algorithm for discovering structure of Linguistic Variation}
+
+We apply the model explorer algorithm suggested by Ben Hur et al. in their paper "A stability based method for discovering structure in clustered data". This computation was optimized ny using the parallelization of the outerloop that covered the number of clusters into 4 cores. 
+
+
+\subsection*{Choosing the number of clusters}
+
+<<read_matrix, echo = FALSE, eval=FALSE, warning = FALSE>>=
+#Reading the Similarity matrix file that is generated by the algorithm
+S_df <- read.csv("similarity_matrix_final.csv", header = T)
+S_df <- S_df[, c(2:ncol(S_df))]
+@
+
+
+
+\begin{figure}
+  \centering
+\begin{center}
+<<histogram, fig = TRUE, echo = FALSE, warning = FALSE, out.width='0.5\\linewidth', fig.width=8, fig.height=10>>='
+
+S_df <- read.csv("similarity_matrix_final.csv", header = T)
+S_df <- S_df[, c(2:ncol(S_df))]
+#Make the data frame suitable for the histogram ggplot
+S_hist <- gather(S_df)
+
+# Making the histograms for similarity of all the 100 samples for all k
+ggplot(S_hist, aes(value)) + 
+    geom_histogram(bins = 10) + 
+    facet_wrap(~key) + theme_bw() + xlab("Similarity") + ylab("Frequency")
+@
+  \caption{Histogram of the correlation similarity measure for various number of clusters}
+  \label{hist}
+\end{center}
+\end{figure}
+
+
+Using the figure \ref{hist}, we observe that at k=3, the histogram is concentrated at 1 since almost all the runs form the same clusters. None of the other values of the number of cluster is as concentrated towards one as when k is 3. This suggests that no matter however much you purturb the data, the clustering unanimously makes three same clusters in the data. Therefore, we choose the number of clusters to be \textbf{3}. We can also observe from the figure \ref{cum} that the number cumulative distribution when the data is clustered into 3 is optimally close to 1 in similarity to further bolster our choice.
+
+\begin{figure}
+  \centering
+\begin{center}
+<<cum_graph, fig=TRUE, echo = FALSE, warning = FALSE, out.width='0.5\\linewidth', fig.width=8, fig.height=10>>=
+k_max = 10
+
+# Making the palette of colors for the 10 different number of centers
+cc <- palette()
+palette(c(cc,"purple","brown"))
+
+# Add extra space to right of plot area; change clipping to figure
+par(mar=c(5.1, 4.1, 4.1, 8.1), xpd=TRUE)
+
+#Plotting the cumulative distribution of similarity for all k 
+plot(ecdf(S_df[[1]]), cex = 0.21, lty = 2.1, main = "", xlab = "Similarity", ylab = "Cumulative", col = 1)
+for (i in c(2:k_max-1)) {
+  lines(ecdf(S_df[[i]]), cex = 0.21, lty = 2.1, col = i)
+}
+legend('topright', 
+       legend=paste0("k = ", c(2:k_max)),  # text in the legend
+       col=palette()[c(1:k_max-1)],  # point colors
+       pch=15, cex = 1, bty = "n", inset = c(-0.21, 0))  # specify the point type to be a square
+
+@
+  \caption{Cumulative distributions for increasing values of k}
+  \label{cum}
+\end{center}
+\end{figure}
+
+\section*{Discussion on the algorithm}
+Since this algorithm perturbs the data by subsampling large number of times and checks the similarity of each of the sub samples for each case of possible number of clusters, I find it a pretty robust as well as trustable method to choose the number of clusters. I feel that this method could be coupled with the elbow curve to strengthen the choice. A deep and prominent elbow would also be robust and stable with the changing intialization and perturbations in the data. This would not be computationally as expesive as the algorithm suggested by Ben Hurr et al. in the paper. So, we must consider it if the elbow is not very prominent to make the decision about number of clusters.
+
+
+
+\end{document}
